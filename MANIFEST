@@ -1,0 +1,12 @@
+Build.PL
+Changes
+examples/basic.pod
+examples/basic_config-file.yml
+lib/Getopt/AsDocumented.pm
+MANIFEST
+MANIFEST.SKIP
+META.yml
+README
+t/00-load.t
+t/basic.t
+todo
