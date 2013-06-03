@@ -44,7 +44,7 @@ accordingly.
 
 DEFAULT: 20
 
-=item -b, --bar YAY [--bar ...]
+=item -b, --bar YAY [--bar ...] (number)
 
 One or more bar-razing values.
 

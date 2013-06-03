@@ -1,5 +1,5 @@
 package Getopt::AsDocumented;
-$VERSION = v0.0.1;
+$VERSION = v0.0.2;
 
 use warnings;
 use strict;
@@ -20,6 +20,7 @@ Getopt::AsDocumented - declare options as pod documentation
   =cut
 
   sub main {
+    my (@args) = @_;
     my $opt = Getopt::AsDocumented->process(\@args) or return;
 
     my $what = $opt->what;
@@ -132,6 +133,43 @@ the bracketed text.
 
   =item --foo FOO [--foo ...] (integer)
 
+=head2 Defaults
+
+An option's default may be set by the string "DEFAULT: " at the
+beginning of a paragraph.  The remainder of that paragraph contains the
+default value.
+
+  =item --foo FOO
+
+  The setting for foo.
+
+  DEFAULT: bar
+
+Any leading whitespace after the ':' is removed.
+
+A single leading backslash (if present) will be removed and the rest of
+the string will be treated as a literal.
+
+A boolean default may be "NO".  Without a value, a boolean will default
+to undef.  Anything true will be translated to '1'.
+
+  =item --foo
+
+  Whether to foo or not.
+
+  DEFAULT:  yes.  Use --no-foo to disable this.
+
+The strings "no" or "false" may also be used as "0".
+
+If the default is enclosed with braces ({}), it is interpreted as a
+block of code.  For literal braces, use a leading backslash.
+
+  =item --input FILENAME
+
+  Input file.
+
+  DEFAULT: {File::Fu->home + 'input.txt'}
+
 =head1 Handlers
 
 =head2 config_file_handler
@@ -187,7 +225,13 @@ sub make_object {
   my $obj = $self->SUPER::make_object(@_);
 
   if(my $do = $obj->can('config_file')) {
-    if(my $file = $do->($obj)) {
+    # XXX this is so wrong
+    my %defaults = map({@$_} @{$self->{_defaults}});
+    my $lazy = $defaults{config_file};
+
+    if(my $file = $do->($obj) ||
+      $lazy && do {$obj->{config_file} = $lazy->()}
+    ) {
       local $self->{object} = $obj; # must have a context
       $self->load_config_file($file) if(-e $file);
     }
@@ -195,6 +239,17 @@ sub make_object {
 
   return($obj);
 } # make_object ########################################################
+
+
+=head2 handler
+
+Accessor.
+
+  my $handler = $go->handler;
+
+=cut
+
+sub handler { shift->{handler} }
 
 =head2 version_handler
 
@@ -213,8 +268,11 @@ sub version_handler {
   $caller = ref($caller) || $caller;
   eval {require version}; # for stringy VERSION() support (I hope)
   my $v = $caller->VERSION || main->VERSION || '<undefined>';
-  require File::Basename;
-  print File::Basename::basename($0), " version $v\n";
+  my $name = $self->{program_name} || do {
+    require File::Basename;
+    File::Basename::basename($0)
+  };
+  print "$name version $v\n";
   $self->quit;
 } # version_handler ####################################################
 
@@ -394,7 +452,7 @@ sub command {
         push(@long, $opt);
       }
       else {
-        $opt =~ s/^-// or croak("'$opt' must have a leading dash");
+        $opt =~ s/^-// or Carp::croak("'$opt' must have a leading dash");
         (length($opt) == 1) or Carp::croak("'$opt' malformed");
         push(@short, $opt);
       }
@@ -424,17 +482,39 @@ sub command {
     $self->__store_last;
     return;
   }
-  $self->{__current} or return;
 
   if($command eq 'for') {
     my ($t, @and) = split(/\n=for /, $p);
-    my %ok = map({$_ => 1} qw(positional help isa call opposes));
+
+    my %for_items = map({$_ => 1} qw(positional help isa call opposes));
+    my %for_globals = (
+      handler => sub {
+        my $class = shift;
+        unless($class->can('VERSION')) {
+          eval("require $class");
+          $@ and Carp::croak("cannot load your handler: $@");
+        }
+        $self->{__go}{handler} = $class;
+      },
+      program_name => sub {
+        $self->{__go}{program_name} = shift;
+      },
+    );
+
+
     my ($thing, $val) = split(/ /, $t, 2);
-    if($ok{$thing}) {
+
+    if($for_items{$thing}) {
+      $self->{__current} or Carp::croak("'=for $thing' out of context");
       $self->{__current}{$thing} = defined($val) ? $val : 1;
     }
+    elsif(my $do = $for_globals{$thing}) {
+      $self->{__current} and Carp::croak("'=for $thing' out of context");
+      $do->($val);
+    }
     else {warn "unhandled: $t\n"}
-    $self->command(for => $_) for(@and);
+
+    $self->command('for' => $_) for(@and);
   }
 }
 sub verbatim {
@@ -455,14 +535,24 @@ sub textblock {
   if($p =~ m/^DEFAULT(?::|\s*=)\s*(.*)/) {
     my $def = $1;
 
-    # normalize it
-    if($def =~ s/^(["'])//) {
-      $def =~ s/$1$//;
+    if($def =~ s/^\\//) {
+      # everything after that is literal
     }
-    # warn "$s->{canon} $s->{type}\n";
-    if($s->{type} eq 'boolean') {
-      $def =~ s/^no$/0/i;
-      $def = 1 if($def);
+    elsif($def =~ s/^\{//) {
+      $def =~ s/\}$// or croak("DEFAULT must have closing brace");
+      my $sub = eval("sub { $def }");
+      $@ and Carp::croak("error $@\nin DEFAULT block '$def'");
+      $def = $sub;
+    }
+    else { # normalize it
+      if($def =~ s/^(["'])//) {
+        $def =~ s/$1$//;
+      }
+      # warn "$s->{canon} $s->{type}\n";
+      if($s->{type} eq 'boolean') {
+        $def =~ s/^(no|false)$/0/i;
+        $def = 1 if($def);
+      }
     }
 
     $s->{default} = $def;
@@ -471,7 +561,8 @@ sub textblock {
     # make help from the first sentence
     $p =~ s/\n+$//;
     $p = lcfirst($p);
-    $p =~ s/\.( *|$).*//s;
+    $p =~ s/\.(\)?)( *|$).*/$1/s;
+    # TODO some coverage of this - and what to do about parens?
     #warn "text: $p\n";
     $s->{help} = $p;
   }
